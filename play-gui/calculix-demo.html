@@ -194,7 +194,7 @@
     <a class="button" href="https://freecad.virtastic.app/?utm_source=demo&amp;utm_medium=widget&amp;utm_campaign=calculix-wasm&amp;utm_content=cta" target="_blank" rel="noopener">Open FreeCAD &rarr;</a>
   </div>
 
-  <footer>Built from the CalculiX 2.22 &rarr; WebAssembly chain documented at <a href="https://github.com/Virtastic/WASM-Dep" target="_blank" rel="noopener">github.com/Virtastic/WASM-Dep</a></footer>
+  <footer>CalculiX 2.22 compiled to WebAssembly. Build scripts and the Fortran translation tools are at <a href="https://github.com/Virtastic/freecad-web" target="_blank" rel="noopener">github.com/Virtastic/freecad-web</a></footer>
 </div>
 
 <script>
@@ -257,7 +257,7 @@ function loadCcxScript() {
   });
 }
 
-// Mirrors the block() extraction in WASM-Dep/tools/verify-calculix-deck.sh's Python check,
+// Mirrors the block() extraction in the Python deck check we run when building the solver,
 // ported to JS so the same regex logic runs against the same bar.dat. No 'm' flag: with it,
 // $ matches end-of-LINE rather than end-of-string, which truncated the capture to row 1 only.
 function block(text, title) {

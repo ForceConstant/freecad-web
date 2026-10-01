@@ -295,6 +295,70 @@ console.log('server files, page half, no server:');
   eq(t.calls.length, before, 'and a save on such a site writes nothing');
 }
 
+// 404 is TWO different answers, and conflating them is what told a user on a server with
+// FCWEB_FILES=1 that the operator had not enabled it. files_off = the feature is off;
+// no_namespace = the feature is ON and this browser has named no folder, which is exactly
+// what a second browser looks like before its folder key is pasted.
+//
+// Asserted on the TOAST, because that string is what misled the user: with a key
+// configured, a browser that has not pasted one was told "ask the operator to start it with
+// FCWEB_FILES=1" -- an env var that was already set. The two cases must not share a message.
+{
+  const mk = (code) => load({
+    fetch: () => Promise.resolve({
+      status: 404, ok: false,
+      text: () => Promise.resolve('{"error":"x","code":"' + code + '","hint":"h"}')
+    })
+  });
+  const say = (t) => t.toasts.map((x) => x.text).join(' | ');
+
+  const off = mk('files_off');
+  await off.api.list();
+  ok(/FCWEB_FILES=1/.test(say(off)), 'feature genuinely off: the toast names the env var');
+  eq(off.sandbox.document.body.children.length, 0, 'and no panel is opened');
+
+  // The right answer to no_namespace is the PANEL, not a toast: the panel holds the folder
+  // key field, so opening it is how the user fixes this. Asserted on the panel's own text,
+  // since that is what the user reads.
+  const ns = mk('no_namespace');
+  await ns.api.list();
+  ok(ns.sandbox.document.body.children.length > 0,
+     'no_namespace opens the panel, because that is where the key is entered');
+  ok(/FCWEB_FILES=1/.test(say(ns)) === false,
+     'and must NOT tell the user to set an env var that is already set');
+  const texts = (function walk(n, out) {
+    // stubEl() keeps the textContent setter's value in _text, not _t.
+    (n.children || []).forEach((c) => { if (c._text) out.push(c._text); walk(c, out); });
+    return out;
+  })(ns.sandbox.document.body, []);
+  const panel = texts.join(' | ');
+  ok(/folder key/i.test(panel), 'and the panel says a folder key is what is missing (' + panel.slice(0, 120) + ')');
+}
+
+// The raw error must still carry WHICH 404 it was, because three handlers branch on it.
+{
+  const src = fs.readFileSync(HTML, 'utf8');
+  const n = (src.match(/e\.noFolder=!e\.off/g) || []).length;
+  ok(n >= 2, 'both fetch paths set the noFolder flag (' + n + ')');
+  ok(/e\.off=!!\(j&&j\.code===\x27files_off\x27\)/.test(src),
+     'and neither treats every 404 as "feature off"');
+}
+
+// The one that would have bitten a second browser: a shared-key server answers 404 to a
+// browser that has not pasted the key, and that must not read as "the feature is off".
+{
+  const t = load({
+    fetch: () => Promise.resolve({
+      status: 404, ok: false,
+      text: () => Promise.resolve(
+        '{"error":"no namespace","code":"no_namespace","hint":"paste the folder key"}')
+    })
+  });
+  const before = t.calls.length;
+  t.api.onSave('/home/web_user/_dl/Box.FCStd', new Uint8Array([1, 2, 3]));
+  eq(t.calls.length, before, 'a save never happens without a confirmed site');
+}
+
 // The panel must survive being opened twice. Found on 2026-10-01 by the manual pass:
 // clicking Open threw "something went wrong" because the close helper called .remove() on
 // the HANDLE object rather than its element, so the document never opened. Reopening is

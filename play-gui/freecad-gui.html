@@ -6390,6 +6390,7 @@ window.fcRunPy = fcRunPy;
   var fcFilesAsked=false;     // has this browser been asked whether to keep work here?
   var fcFilesBusy=false;      // a save is in flight; do not stack another
   var fcFilesKey=null;        // a shared-folder key, when the operator set one
+  var fcFilesWhy=null;        // why the last probe failed: null | 'off' | 'no-namespace'
 
   // A shared folder key, if this browser was given one: ?key=... on the URL, kept for the
   // tab in sessionStorage so it survives the engine loading without persisting a secret to
@@ -6453,14 +6454,22 @@ window.fcRunPy = fcRunPy;
     // the request would address a folder that can never be right.
     if(!h['X-Fcweb-Ns'] && !h['X-Fcweb-Key']){ return Promise.reject(new Error('no key')); }
     if(ctype){ h['Content-Type']=ctype; }
-    // The server answers 404 for a disabled server and for an empty folder alike, so the
-    // page cannot tell "this site keeps no files" from "you have none yet" -- it asks once
-    // and treats a 404 as no, which is right for both.
+    // 404 is NOT one thing. files_off means this server does not keep documents at all;
+    // no_namespace means it DOES and this browser has named no folder -- which is exactly
+    // what a second browser looks like before its folder key is pasted. Collapsing the two
+    // told a user with a working feature that the operator had not enabled it, and pointed
+    // them at FCWEB_FILES when the real answer was the key field a few rows below.
     return fetch('/files'+path, {method:method, headers:h, body:body, cache:'no-store'})
       .then(function(r){
-        if(r.status===404){ var e=new Error('files_off'); e.off=true; throw e; }
         return r.text().then(function(t){
           var j=null; try{ j=JSON.parse(t); }catch(e){}
+          if(r.status===404){
+            var e=new Error((j&&j.hint)||'no folder');
+            e.code=j&&j.code;
+            e.off=!!(j&&j.code==='files_off');
+            e.noFolder=!e.off;
+            throw e;
+          }
           if(!r.ok){ var e2=new Error((j&&(j.hint||j.error))||('HTTP '+r.status));
                     e2.code=j&&j.code; throw e2; }
           return j;
@@ -6483,14 +6492,20 @@ window.fcRunPy = fcRunPy;
     try{ on?localStorage.setItem(FSON,'1'):localStorage.removeItem(FSON); }catch(e){}
   }
 
-  // Is there a server on this site that keeps documents? Asked once, and a 404 is the
-  // answer: an absent session container is indistinguishable from one with the feature off,
-  // which is also how the page should treat it.
+  // Is there a server on this site that keeps documents? TWO answers, not one, and
+  // collapsing them is what produced "FCWEB_FILES=1 is not set" on a server that had it
+  // set: no_namespace means the feature IS on and this browser has named no folder, which is
+  // a different problem with a different fix and its own field in the panel.
+  // fcFilesWhy records which, so the boolean stays a boolean -- five callers depend on it.
   function fcFilesAvailable(){
     if(fcFilesAvail!==null){ return Promise.resolve(fcFilesAvail); }
     return fcFileApi('GET','').then(function(j){
-      fcFilesAvail=!!(j&&j.files); return fcFilesAvail;
-    }).catch(function(e){ fcFilesAvail=false; return false; });
+      fcFilesAvail=!!(j&&j.files); fcFilesWhy=null; return fcFilesAvail;
+    }).catch(function(e){
+      fcFilesAvail=false;
+      fcFilesWhy=(e&&e.noFolder)?'no-namespace':'off';
+      return false;
+    });
   }
 
   // Save one staged file to the server folder. Silent on success: this also runs on the
@@ -6520,6 +6535,16 @@ window.fcRunPy = fcRunPy;
           if(window.fcwebNotify){
             window.fcwebNotify('This site does not keep documents on its server, so nothing '
               + 'leaves your browser. Ask the operator to start it with FCWEB_FILES=1.','warn');
+          }
+        }
+        return null;
+      }
+      if(e&&e.noFolder){                  // feature is on; this browser has named no folder
+        if(!fcFilesAsked){ fcFilesAsked=true;
+          if(window.fcwebNotify){
+            window.fcwebNotify('This site keeps documents, but this browser has not been given '
+              + 'its folder key yet, so nothing was sent. Open Edit > Server Files... and paste '
+              + 'the key to save here.','warn');
           }
         }
         return null;
@@ -6565,15 +6590,22 @@ window.fcRunPy = fcRunPy;
     return fetch('/files/'+encodeURIComponent(name), {
       headers:h, cache:'no-store'
     }).then(function(r){
-      if(r.status===404){ var e=new Error('files_off'); e.off=true; throw e; }
-      if(!r.ok){
-        return r.text().then(function(t){
-          var j=null; try{ j=JSON.parse(t); }catch(e){}
-          var e2=new Error((j&&(j.hint||j.error))||('HTTP '+r.status));
-          e2.code=j&&j.code; throw e2;
-        });
-      }
-      return r.arrayBuffer();
+      // Success: the bytes. Branch on the status BEFORE touching the body -- a Response body
+      // is a single stream, so reading it as text and then as an ArrayBuffer throws
+      // "body stream already read" and every open would fail.
+      if(r.ok){ return r.arrayBuffer(); }
+      return r.text().then(function(t){
+        var j=null; try{ j=JSON.parse(t); }catch(e){}
+        if(r.status===404){
+          var e=new Error((j&&j.hint)||'no folder');
+          e.code=j&&j.code;
+          e.off=!!(j&&j.code==='files_off');
+          e.noFolder=!e.off;
+          throw e;
+        }
+        var e2=new Error((j&&(j.hint||j.error))||('HTTP '+r.status));
+        e2.code=j&&j.code; throw e2;
+      });
     });
   }
 
@@ -6604,6 +6636,7 @@ window.fcRunPy = fcRunPy;
         window.fcwebNotify('Opened '+name+' from the server.','info');
     }).catch(function(e){
       if(e&&e.off){ window.fcwebNotify('This site does not keep documents on its server.','warn'); return; }
+      if(e&&e.noFolder){ window.fcwebNotify('This browser has no folder yet — paste the folder key in the field above.','warn'); return; }
       window.fcwebNotify('Could not open '+name+': '+(e&&e.message||e),'error');
     });
   }
@@ -6749,12 +6782,25 @@ window.fcRunPy = fcRunPy;
         window.fcwebNotify('This site does not keep documents on its server.','warn');
         return;
       }
+      // The feature is on and this browser simply has no folder yet. Close and reopen is
+      // wrong here -- the panel IS the fix, because it holds the key field -- so leave it up
+      // and put the reason in it, where the user can act on it.
+      if(e&&e.noFolder){
+        fcFilePanel.list.textContent='This browser has no folder yet. Paste the folder key '
+          + 'above and press Use folder.';
+        return;
+      }
       fcFilePanel.list.textContent='Could not reach the server: '+(e&&e.message||e);
     });
   }
   function fcFileList(){
     return fcFilesAvailable().then(function(ok){
       if(!ok){
+        // "No folder" and "no feature" are different, and telling a user to ask an operator
+        // for FCWEB_FILES=1 when it is already set is the wrong instruction at the wrong
+        // moment. On no-namespace the panel is still the right destination: it holds the key
+        // field, so opening it is how the user fixes this themselves.
+        if(fcFilesWhy==='no-namespace'){ fcFilePanelBuild(); fcFilePanelRefresh(); return; }
         window.fcwebNotify('This site does not keep documents on its server, so nothing leaves '
           + 'your browser. Ask the operator to start it with FCWEB_FILES=1.','warn');
         return;

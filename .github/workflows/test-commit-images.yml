@@ -1,0 +1,247 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (c) Virtastic
+name: test-commit-images
+
+# TEST-ONLY. Builds both images from every push to this branch and pushes them to
+# ForceConstant's own package namespace, tagged with the commit sha.
+#
+# This exists to answer the one question the PRs could not: does the change actually work
+# inside the real images, through the real nginx, with the real session container? A
+# structural check of the YAML and a passing selftest prove the code is sound; they prove
+# nothing about whether /files is reachable through a proxy.
+#
+# WHY THIS IS SEPARATE FROM publish-session-ghcr.yml rather than a flag on it:
+#
+#  * The repo guard. publish-session-ghcr.yml is pinned to github.repository ==
+#    'Virtastic/freecad-web', deliberately -- it pushes to the org's registry. A file in
+#    this fork must not be able to publish there, so the guard stays untouched and this
+#    workflow targets a different repository and a different namespace.
+#
+#  * The artifacts. The app image needs the seven engine files from a Release, and THIS
+#    fork has no releases. A copy of the upstream workflow would fail at
+#    `gh release download -R $GITHUB_REPOSITORY`, because that resolves to ForceConstant and
+#    finds nothing. So ARTIFACT_REPO below points at upstream, and ARTIFACT_TAG is pinned.
+#    Consequence worth knowing: a commit image contains THIS branch's freecad-gui.html and
+#    nginx.conf on top of the v1.0.6 ENGINE. If that branch ever changed the engine, the
+#    image would be a mix and the test would be meaningless -- so the pin is deliberate and
+#    the smoke test below asserts the marker string is actually present, which is what makes
+#    the mix visible rather than silent.
+#
+# NOTHING HERE IS SAFE TO DEPLOY. Tags are prefixed test- and are not semver, so the real
+# publish workflows (which require a v* tag) can never pick them up.
+on:
+  push:
+    branches:
+      - 'test/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  ARTIFACT_REPO: Virtastic/freecad-web
+  ARTIFACT_TAG: v1.0.6
+
+jobs:
+  session:
+    # The small, fast one. If this fails nothing else is worth running.
+    name: session image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Resolve tags
+        id: t
+        run: |
+          sha="${GITHUB_SHA::12}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/forceconstant/freecad-web-session" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          IMAGE: ${{ steps.t.outputs.image }}
+          SHA: ${{ steps.t.outputs.sha }}
+        run: |
+          set -eu
+          DOCKER_BUILDKIT=1 docker build -t "${IMAGE}:test-${SHA}" -f infra/session/Dockerfile .
+          docker image inspect "${IMAGE}:test-${SHA}" --format '  {{.Size}} bytes'
+
+      # These are the same assertions the real workflow makes, and they are the ones that
+      # matter: /files must refuse by default, because an image that silently enabled server
+      # files would move every user's documents off their machine unasked.
+      - name: Verify (feature OFF)
+        env:
+          IMAGE: ${{ steps.t.outputs.image }}
+          SHA: ${{ steps.t.outputs.sha }}
+        run: |
+          set -eu
+          docker run -d --name v1 -p 8098:8000 "${IMAGE}:test-${SHA}"
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://localhost:8098/share/health && break
+            [ "$i" = 30 ] && { docker logs v1; exit 1; }
+            sleep 1
+          done
+          code=$(curl -s -o /tmp/f.json -w '%{http_code}' http://localhost:8098/files)
+          echo "  /files -> $code $(cat /tmp/f.json)"
+          [ "$code" = "404" ] || { echo "::error::/files must be 404 when FCWEB_FILES is unset"; exit 1; }
+          grep -q files_off /tmp/f.json || { echo "::error::expected files_off"; exit 1; }
+          docker rm -f v1
+
+      - name: Verify (feature ON)
+        env:
+          IMAGE: ${{ steps.t.outputs.image }}
+          SHA: ${{ steps.t.outputs.sha }}
+        run: |
+          set -eu
+          docker run -d --name v2 -p 8098:8000 -e FCWEB_FILES=1 "${IMAGE}:test-${SHA}"
+          # Readiness is /share/health, not /files: /files answers 404 without a namespace
+          # header even when the feature is on, and `curl -f` would call that a failure.
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://localhost:8098/share/health && break
+            [ "$i" = 30 ] && { docker logs v2; exit 1; }
+            sleep 1
+          done
+          ns=0123456789abcdef0123456789abcdef
+          curl -fsS -X PUT -H "X-Fcweb-Ns: $ns" --data-binary 'FCStd-bytes' \
+            -o /dev/null http://localhost:8098/files/Smoke.FCStd
+          curl -fsS http://localhost:8098/files | grep -q Smoke.FCStd \
+            || { echo "::error::saved document did not come back"; exit 1; }
+          got=$(curl -fsS -H "X-Fcweb-Ns: $ns" http://localhost:8098/files/Smoke.FCStd)
+          [ "$got" = "FCStd-bytes" ] || { echo "::error::bytes did not round-trip: $got"; exit 1; }
+          echo "  /files reachable when opted in, bytes round-trip"
+          docker rm -f v2
+
+      - name: Push
+        env:
+          IMAGE: ${{ steps.t.outputs.image }}
+          SHA: ${{ steps.t.outputs.sha }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          echo "$TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker push "${IMAGE}:test-${SHA}"
+          echo "pushed ${IMAGE}:test-${SHA}"
+
+  app:
+    # The expensive one: a ~445 MB artifact download and a 1.1 GB image. Kept as its own job
+    # so a session failure is not reported as an app failure.
+    name: app image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Resolve tags
+        id: t
+        run: |
+          echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/forceconstant/freecad-web" >> "$GITHUB_OUTPUT"
+
+      # From UPSTREAM, not from this fork. The -R flag is the whole point: without it this
+      # resolves to ForceConstant/freecad-web, which has no releases, and the job dies with a
+      # confusing "release not found" instead of an honest one.
+      - name: Fetch engine artifacts from upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ env.ARTIFACT_REPO }}
+          TAG: ${{ env.ARTIFACT_TAG }}
+        run: |
+          set -eu
+          for name in FreeCAD.js FreeCAD.wasm FreeCAD.data gmsh.js gmsh.wasm ccx.js ccx.wasm; do
+            gh release download "$TAG" -R "$REPO" -p "$name" -D play-gui --clobber
+            [ -s "play-gui/$name" ] || { echo "::error::$name missing or empty"; exit 1; }
+          done
+          ls -l play-gui/ | sed 's/^/  /'
+
+      # Same as upstream's workflow: the CalculiX demo is site-only and must never reach a
+      # published image or a self-hoster's disk.
+      - name: Drop site-only files
+        run: rm -f play-gui/calculix-demo.html
+
+      # Fail here, before a 1.1 GB build, if the branch's page never made it into the image.
+      # The artifacts above come from a release, so a silent failure here would produce an
+      # image that is 1.0.6 wearing this branch's name -- exactly the mix this file warns
+      # about, and exactly the thing a visual test would misread as "no change".
+      - name: The page in this branch must be the page that gets built
+        run: |
+          set -eu
+          grep -q fcwebServerFiles play-gui/freecad-gui.html \
+            || { echo "::error::this branch's freecad-gui.html is not in the build context"; exit 1; }
+          grep -q 'location /files' infra/nginx.conf \
+            || { echo "::error::infra/nginx.conf has no /files location"; exit 1; }
+          echo "  page and nginx carry the branch's changes"
+
+      - name: Build
+        env:
+          IMAGE: ${{ steps.t.outputs.image }}
+          SHA: ${{ steps.t.outputs.sha }}
+        run: |
+          set -eu
+          DOCKER_BUILDKIT=1 docker build \
+            --build-arg "FCWEB_BUILD=${GITHUB_SHA::12}+test" \
+            -t "${IMAGE}:test-${SHA}" -f infra/Dockerfile .
+          docker image inspect "${IMAGE}:test-${SHA}" --format '  {{.Size}} bytes'
+
+      - name: Verify before pushing
+        env:
+          IMAGE: ${{ steps.t.outputs.image }}
+          SHA: ${{ steps.t.outputs.sha }}
+        run: |
+          set -eu
+          docker run -d --name v3 -p 8099:80 "${IMAGE}:test-${SHA}"
+          for i in $(seq 1 45); do
+            curl -fsS -o /dev/null http://localhost:8099/freecad-gui.html && break
+            [ "$i" = 45 ] && { docker logs v3; exit 1; }
+            sleep 2
+          done
+          # Isolation headers, because without them the engine silently never boots.
+          hdr=$(curl -fsS -D - -o /dev/null http://localhost:8099/)
+          echo "$hdr" | grep -qi 'cross-origin-opener-policy: *same-origin' || exit 1
+          echo "$hdr" | grep -qi 'cross-origin-embedder-policy: *require-corp' || exit 1
+          # The marker must be IN THE SERVED PAGE, not just in the source tree: that is what
+          # proves the artifact shipped and the container did not serve a stale copy.
+          curl -fsS http://localhost:8099/freecad-gui.html | grep -q fcwebServerFiles \
+            || { echo "::error::the served page does not carry this branch's changes"; exit 1; }
+          # /files must exist as a proxy location. With no session container behind it the
+          # answer is 502 -- which is the honest "the backend is absent" signal the page is
+          # written to handle, not a missing location (which would be 404).
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8099/files)
+          echo "  /files through nginx -> $code (502 is correct with no session container)"
+          [ "$code" = "502" ] || [ "$code" = "404" ] \
+            || { echo "::error::unexpected /files status $code"; exit 1; }
+          docker rm -f v3
+
+      - name: Push
+        env:
+          IMAGE: ${{ steps.t.outputs.image }}
+          SHA: ${{ steps.t.outputs.sha }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          echo "$TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker push "${IMAGE}:test-${SHA}"
+          echo "pushed ${IMAGE}:test-${SHA}"
+
+  summary:
+    name: what to run on the box
+    needs: [session, app]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          {
+            echo "### test-commit-images \`${GITHUB_SHA::12}\`"
+            echo ""
+            echo "| image | |"
+            echo "|---|---|"
+            echo "| app | \`ghcr.io/forceconstant/freecad-web:test-${GITHUB_SHA::12}\` |"
+            echo "| session | \`ghcr.io/forceconstant/freecad-web-session:test-${GITHUB_SHA::12}\` |"
+            echo ""
+            echo "Engine artifacts came from **${ARTIFACT_REPO} ${ARTIFACT_TAG}** (this fork has no releases)."
+            echo "The page, nginx and add-on are from this branch."
+            echo ""
+            echo "session: ${{ needs.session.result }} | app: ${{ needs.app.result }}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -100,6 +100,7 @@ booting happily. The installer looks inside the engine before it claims success.
 | `sh setup.sh --port 9000` | Serve somewhere other than 8080 |
 | `sh setup.sh --tag v1.0.0` | Install a specific release |
 | `sh setup.sh --ref dev` | Take the source tree from a branch instead of the release tag |
+| `sh setup.sh --share` | Also run the session service, for shared sessions and the MCP endpoint. Pulls its own image, `ghcr.io/virtastic/freecad-web-session`, and falls back to a local build. Off by default: it stores shared documents unencrypted on your disk. |
 | `sh full-build.sh` | Clone the repository at a tag and build the container from it (~15 min) |
 
 ### Running it

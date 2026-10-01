@@ -46,6 +46,11 @@ services:
   # evictable the write is refused instead.
   session:
     profiles: ["share"]
+    # Same image:/build: pairing as the freecad service above, and for the same reason:
+    # setup.sh picks between them explicitly, and defaults to --no-build when the pull
+    # works. The published image is what makes sharing a one-liner instead of a checkout
+    # plus a local build (issue #7).
+    image: ${FCWEB_SESSION_IMAGE:-ghcr.io/virtastic/freecad-web-session:1.0.6}
     build:
       context: .
       dockerfile: infra/session/Dockerfile

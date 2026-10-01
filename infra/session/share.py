@@ -89,6 +89,16 @@ def _cfg():
         # disk. This is the operator's backstop and nothing is ever evicted to stay under
         # it -- a write is refused instead, same rule as a full folder.
         files_total=int(float(os.environ.get('FCWEB_FILES_TOTAL_GB', '20')) * 1073741824),
+        # An optional SHARED folder key. Set it and every browser that presents it reaches
+        # the same folder, which is what makes "open it on another machine" possible at all:
+        # a per-browser key cannot cross a machine by construction, and there is no way to
+        # copy one across. Unset, each browser is its own folder as before.
+        #
+        # The folder NAME is derived from the key with sha256, never the key itself, so a
+        # secret pasted into a chat or a screenshot never becomes a directory name on disk.
+        # The comparison is constant-time. A browser presenting nothing or the wrong key is
+        # refused as if the folder did not exist, same rule as a session id.
+        files_key=os.environ.get('FCWEB_FILES_KEY', '').strip(),
     )
 
 
@@ -333,7 +343,8 @@ def _err(status, code, hint, error=None):
 HINTS = {
     'bad_id': 'The link is malformed. Ask the sender to copy it again from Edit > Share Session.',
     'files_off': 'This server does not keep documents. Everything stays in this browser; ask the operator to start it with FCWEB_FILES=1.',
-    'no_namespace': 'No folder was named. This page could not claim one -- reload, or clear the site\'s data to start a new folder.',
+    'no_namespace': 'No folder was named. If this server uses a shared folder key, paste it into '
+                    'Edit > Server Files...; otherwise clear the site\'s data to start a fresh folder.',
     'no_file': 'That file is not in this folder any more. Refresh the list.',
     'no_session': 'This session does not exist or has ended. Ask the sender for a fresh link.',
     'evicted': 'This session was removed to free space on the server. Ask the sender to share it again.',
@@ -367,7 +378,26 @@ def _ns_dir(ns):
     return os.path.join(CFG['files_dir'], ns)
 
 
+def _shared_ns():
+    """The folder name for a shared-key install: sha256 of the key, never the key."""
+    return hashlib.sha256(CFG['files_key'].encode()).hexdigest()[:32]
+
+
 def _ns_ok(h):
+    """Which folder this request addresses, or None if it names none.
+
+    With FCWEB_FILES_KEY set, ONLY X-Fcweb-Key counts and the browser's own namespace is
+    ignored entirely -- so a client cannot address a folder it was not given, and every client
+    with the key gets the same one. Constant-time because it is a secret comparison.
+
+    Deliberately not "X-Fcweb-Key or X-Fcweb-Ns": falling back to the namespace would let a
+    namespace value grant access whenever it happened to equal the key, which is confusing to
+    reason about and impossible to audit. One header, one meaning."""
+    if CFG.get('files_key'):
+        given = h.get('x-fcweb-key', '')
+        if given and hmac.compare_digest(str(given), CFG['files_key']):
+            return _shared_ns()
+        return None
     ns = h.get('x-fcweb-ns', '')
     return ns if ID_RE.match(ns) else None
 
@@ -1429,6 +1459,39 @@ def selftest():
     assert 'FCWEB_FILES_TOTAL_GB' in call('PUT', '/files/Nope.FCStd', b'q', X_Fcweb_Ns=ns)[1]['hint'], 'the hint names the knob the operator can turn'
     CFG['files_total'] = 10 ** 7
     assert call('POST', '/files', X_Fcweb_Ns=ns)[0] == 405
+
+    # A shared folder key: every browser that presents it reaches ONE folder, which is the
+    # only arrangement in which "open it on another machine" is possible at all -- a
+    # per-browser namespace cannot cross a machine and there is no way to copy one across.
+    KEY = 'shared-folder-secret'
+    CFG['files_key'] = KEY
+    assert call('PUT', '/files/Shared.FCStd', b'shared', X_Fcweb_Key=KEY)[0] == 200
+    # Two browsers: different namespaces, same key -> the same folder, so one sees the
+    # other's file. This is the entire point of the feature.
+    assert call('GET', '/files/Shared.FCStd', X_Fcweb_Key=KEY, X_Fcweb_Ns='a' * 32)[3] == b'shared'
+    assert call('GET', '/files/Shared.FCStd', X_Fcweb_Key=KEY, X_Fcweb_Ns='b' * 32)[3] == b'shared'
+    assert [f['name'] for f in call('GET', '/files', X_Fcweb_Key=KEY, X_Fcweb_Ns='c' * 32)[1]['files']] \
+        == ['Shared.FCStd'], 'every holder of the key sees the whole folder'
+    # The namespace is IGNORED, not accepted as a fallback: with a key configured only the
+    # key addresses anything. Otherwise a namespace that happened to equal the key would
+    # grant access, which is unauditable.
+    assert call('GET', '/files', X_Fcweb_Ns=ns)[1]['code'] == 'no_namespace'
+    assert call('GET', '/files', X_Fcweb_Ns=KEY)[1]['code'] == 'no_namespace'
+    assert call('GET', '/files')[1]['code'] == 'no_namespace'
+    assert call('GET', '/files', X_Fcweb_Key='wrong')[1]['code'] == 'no_namespace'
+    assert call('GET', '/files', X_Fcweb_Key=KEY.upper())[1]['code'] == 'no_namespace', \
+        'the key is compared exactly'
+    # The key is never a directory name: sha256 of it, so a pasted secret never lands on disk
+    listing = os.listdir(CFG['files_dir'])
+    assert KEY not in listing, 'the key itself must never become a folder name'
+    assert _shared_ns() in listing, 'and the folder is named by its hash'
+    # The per-browser folder it would otherwise have used is untouched and still separate.
+    assert call('GET', '/files', X_Fcweb_Ns=ns)[1]['code'] == 'no_namespace'
+    CFG['files_key'] = ''
+    assert call('GET', '/files/Shared.FCStd', X_Fcweb_Key=KEY)[0] == 404, \
+        'with no key configured a key header addresses nothing'
+    assert call('GET', '/files/Shared.FCStd', X_Fcweb_Ns=ns)[0] == 404, \
+        'and the shared folder is unreachable without the key'
 
     # stop
     assert call('DELETE', '/share/' + sc, X_Fcweb_Edit=jc['edit'])[0] == 403

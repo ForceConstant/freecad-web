@@ -36,6 +36,25 @@ and the Sharing page says the service is not running.
 | `FCWEB_FILES` | `0` (off) | Turns on the server file store (`/files`), so a browser can keep its own documents there. **Off by default**: it is the one feature here that puts a model somewhere other than the user's disk. |
 | `FCWEB_FILES_MAX_GB` | 2 | Per-browser-folder ceiling. A write that does not fit is **refused**, never answered by evicting one of the user's documents — unlike a session, these are not disposable. |
 | `FCWEB_FILES_TOTAL_GB` | 20 | Ceiling on the store as a whole. The per-folder limit cannot do this job: anyone can mint a namespace, so N visitors × a 2 GB folder each is unbounded disk. This is the operator's backstop, and like the folder ceiling it **refuses** rather than evicting. |
+| `FCWEB_FILES_KEY` | — (unset) | Makes the folder **shared**. Any browser presenting this key reaches the same folder, so a document saved on one machine can be opened on another — the only arrangement in which that works, since a per-browser folder cannot cross a machine and there is no way to copy one across. Users paste it into *Edit → Server Files…*, or arrive on a `?key=…` URL. Unset, every browser keeps its own private folder. |
+
+### Shared folder vs per-browser folder
+
+Unset (the default), **each browser has its own folder.** The key lives in that browser's
+`localStorage` and there is no way to move it, so a second machine sees an empty folder. That
+is the right default for a public site: a stranger who opens the app gets their own space and
+nothing else.
+
+Set `FCWEB_FILES_KEY`, and **one folder is shared by everyone who has the key.** The key is
+the only thing addressing it — the browser's own namespace is ignored, not treated as a
+fallback — so a wrong or absent key is 404, same rule as a session id. The folder is *named*
+`sha256(key)`, never the key itself, so a secret pasted into a chat or a screenshot never
+becomes a directory name on disk.
+
+Treat it like a password: anyone with it can read, overwrite and delete every document in the
+folder. It is the right setting for your own box, where you want your laptop and your desktop
+to see the same work — and the wrong one for a shared host, which is what `FCWEB_FILES`
+being off by default is for.
 
 Sessions live in one Docker volume as plain files — `<id>.fcstd`, `<id>.env.json`,
 `<id>.json`. To see them:

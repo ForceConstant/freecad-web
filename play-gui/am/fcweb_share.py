@@ -1145,12 +1145,20 @@ def install():
     # what re-inserts them after a workbench switch rebuilds the menu bar, but it only runs
     # once the autosave loop starts -- which is after the restore gate, several seconds into
     # boot. Reported on 2026-10-01 as the entries not appearing until something was saved.
-    # Safe to call here: ensure_menu() returns False when the menu bar is not built yet, and
-    # it is idempotent, so the tick simply retries.
+    #
+    # _later(), NOT a direct call. install() is reached through py() from the browser half,
+    # so this runs on the wasm stack, and touching Qt widgets from there is what this file
+    # already has a measured scar for: a modal opened from such a callback crashed the tab
+    # outright (2026-09-03), and shiboken reports "Internal C++ object already deleted" for
+    # widgets reached off Qt's own call stack. Calling ensure_menu() here directly was tried
+    # and took the engine down with it -- 2026-10-01, reported as "FreeCAD stopped
+    # unexpectedly" on every reload. The delay is deliberate: the menu bar is still being
+    # built at this point in boot, and _try() swallows any refusal so a failure here costs
+    # the menu entry, never the tab.
     try:
-        ensure_menu()
+        _later(ensure_menu, 0.5)
     except Exception as e:
-        _log('ensure_menu at install failed: %r' % (e,))
+        _log('could not schedule ensure_menu: %r' % (e,))
     pinned = _p().GetString('PinnedDocument', '')
     if pinned:
         pin(pinned)

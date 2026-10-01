@@ -6239,6 +6239,15 @@ window.fcRunPy = fcRunPy;
       // They have just saved real work: the one moment the install offer is concretely
       // about something they would mind losing.
       try{ window.__fcWorkSaved && window.__fcWorkSaved(); }catch(e){}
+      // ...and the same for the server copy. Ctrl+S and the File > Save button land HERE,
+      // not in the save watcher: that one only sees Save As / Export, which go through
+      // FreeCAD's getSaveFileName and are announced by registerSave(). Plain Save writes to
+      // the document's existing FileName, so nothing ever announced it. Without this the
+      // most common save action never reached the server, and a document synced after Save
+      // As then kept serving its older copy no matter how often it was saved. The bytes are
+      // in hand and the staged copy is already unlinked above, so this passes them
+      // directly rather than re-reading a file that is gone.
+      try{ if(window.fcwebServerFiles){ window.fcwebServerFiles.onSave && window.fcwebServerFiles.onSave(dir+'/'+name, bytes); } }catch(e){}
       return;
     }
     alert('Save timed out');
@@ -6449,12 +6458,19 @@ window.fcRunPy = fcRunPy;
   // Save one staged file to the server folder. Silent on success: this also runs on the
   // save tick, so a toast every autosave would be noise. Failures are loud, because the
   // user believes the work is somewhere safe.
+  // A failure already reported once is not reported again until it changes or succeeds.
+  // Automatic saves go through here on every Ctrl+S, and a model over the server's 25 MB
+  // per-document cap would otherwise raise an error toast every single time -- which is
+  // how a working local save ends up looking broken. Silence is not the answer either:
+  // the user believes the copy is safe, so the first failure must say so plainly.
+  var fcFileFailSeen={};
   function fcFileSave(path, bytes, quiet){
     var name=fcFileName(path);
     if(!name){ return Promise.reject(new Error('no name')); }
     fcFilesBusy=true;
     return fcFileApi('PUT', '/'+encodeURIComponent(name), bytes).then(function(j){
       append('saved to server: '+name+' ('+fcFileSize(j.bytes)+')');
+      delete fcFileFailSeen[name];      // recovered: the next failure of any kind may speak
       if(!quiet&&window.fcwebNotify){
         window.fcwebNotify(name+' is on the server. Open it from any browser on this site.',
           'info');
@@ -6471,8 +6487,13 @@ window.fcRunPy = fcRunPy;
         return null;
       }
       append('server save failed: '+name+' '+(e&&e.message||e),'err');
-      if(window.fcwebNotify){ window.fcwebNotify('Could not save '+name+' to the server: '
-        +(e&&e.message||e),'error'); }
+      if(window.fcwebNotify&&!fcFileFailSeen[name]){
+        fcFileFailSeen[name]=true;
+        window.fcwebNotify('Could not copy '+name+' to the server: '
+          +(e&&e.message||e)+' It is still saved in this browser and downloaded to your '
+          + 'machine, but the server copy is out of date. Edit > Server Files... lists what '
+          + 'did get through.','error');
+      }
       throw e;
     }).then(function(r){ fcFilesBusy=false; return r; },
              function(e){ fcFilesBusy=false; throw e; });
@@ -6687,8 +6708,9 @@ window.fcRunPy = fcRunPy;
         [{label:'Send copies to the server', onClick:function(){
           fcFileEnable(true);
           window.fcwebNotify('Documents will now also be copied to this site\'s server each '
-            + 'time you save. Your browser copy stays too, and File > Save still downloads to '
-            + 'your machine. Turn it off any time from Edit > Server Files...','info');
+            + 'time you save -- File > Save, Ctrl+S, Save As and Export alike. Your browser '
+            + 'copy stays, and saves still download to your machine. Review or delete what '
+            + 'is stored from Edit > Server Files...','info');
         }},{label:'No thanks', onClick:function(){}}],
         {dismissOnAction:true});
     }).catch(function(){});

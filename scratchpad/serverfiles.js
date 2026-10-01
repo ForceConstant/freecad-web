@@ -258,6 +258,29 @@ console.log('server files, page half, no server:');
   ok(t.calls[t.calls.length - 1][1].indexOf('/files/Box.FCStd') >= 0, 'to the document URL');
 }
 
+// BOTH save paths must copy to the server. Found by the manual pass on 2026-10-01:
+// plain File > Save and Ctrl+S land in download(), which had no reference to the server
+// copy at all -- only Save As / Export do, because those go through getSaveFileName and
+// are announced by registerSave() into the save watcher. The symptom was a document that
+// synced after Save As and then never updated again however often it was saved.
+//
+// download() lives in a different script block from the one this harness extracts, so it
+// cannot be called here. What CAN be asserted, and what would have caught it, is that the
+// function body itself reaches the server copy -- parsed out of the real file rather than
+// grepped, so the watcher's call cannot mask its absence.
+{
+  const src = fs.readFileSync(HTML, 'utf8');
+  const m = src.match(/  async function download\(\)\{[\s\S]*?\n  \}\n/);
+  ok(!!m, 'download() is still present in the page');
+  if (m) {
+    ok(m[0].indexOf('fcwebServerFiles.onSave') > 0,
+       'download() -- the File > Save / Ctrl+S path -- copies to the server');
+    // It must pass the bytes it just handed to the browser. Re-reading the staged file
+    // cannot work: download() unlinks it before returning.
+    ok(/onSave\(.*bytes\)/.test(m[0]), 'and passes the bytes, not a path to re-read');
+  }
+}
+
 // ...and the whole thing stays off if the site has no store, even once enabled.
 {
   const t = load({

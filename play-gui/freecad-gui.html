@@ -1266,7 +1266,12 @@ window.fcwebNotify = function (text, kind, actions, opts) {
           // stacked a second prompt on top of the first, and the answer went to whichever
           // one happened to be first in the DOM -- so the reply reached a promise that had
           // already been settled, and nothing happened.
-          if (field) kill();
+          //
+          // `dismissOnAction` is opt-in rather than automatic: a toast with a field is a
+          // form, and one with plain buttons may be reporting progress while it stays up
+          // (see watchForMissingLinks, which keeps its toast until the user acts). A
+          // one-shot yes/no offer should ask for this instead of assuming it.
+          if (field || (opts && opts.dismissOnAction)) kill();
         });
         row.appendChild(btn);
       });
@@ -6560,7 +6565,14 @@ window.fcRunPy = fcRunPy;
   // take the user's document choices with it.
   var fcFilePanel=null;
   function fcFilePanelClose(){
-    if(fcFilePanel){ fcFilePanel.remove(); fcFilePanel=null; }
+    // fcFilePanel is a HANDLE ({el, list, foot}), not the element. Calling .remove() on
+    // the handle threw a TypeError, which the global handler surfaced as "something went
+    // wrong" -- and because the throw happened BEFORE fcFileOpen() on the same click, the
+    // document never opened at all. Found by the manual pass on 2026-10-01.
+    if(fcFilePanel){
+      try{ if(fcFilePanel.el && fcFilePanel.el.remove) fcFilePanel.el.remove(); }catch(e){}
+      fcFilePanel=null;
+    }
   }
   function fcFilePanelBuild(){
     fcFilePanelClose();
@@ -6666,13 +6678,19 @@ window.fcRunPy = fcRunPy;
       if(!ok||fcFileEnabled()||fcFilesAsked){ return; }
       fcFilesAsked=true;
       if(!window.fcwebNotify){ return; }
-      window.fcwebNotify('This site can keep a copy of your documents on its server, so you can '
-        + 'reopen them later or from another machine. Off by default: everything stays in this '
-        + 'browser until you turn it on.','info',[{label:'Keep documents here', onClick:function(){
+      // Wording matters here more than usual. "Keep documents here" was reported as
+      // ambiguous -- "here" reads as this computer. So: name the server explicitly, say
+      // plainly that the local copy stays, and say what they get.
+      window.fcwebNotify('This site can save a copy of each document to ITS SERVER when you '
+        + 'use File > Save, so you can open it later or from another browser. Your own copy '
+        + 'stays in this browser, and nothing is sent until you turn this on.','info',
+        [{label:'Send copies to the server', onClick:function(){
           fcFileEnable(true);
-          window.fcwebNotify('Documents will be copied to this server as you save them. Your '
-            + 'browser copy stays too. Turn it off any time from the server file list.','info');
-        }},{label:'No thanks', onClick:function(){}}]);
+          window.fcwebNotify('Documents will now also be copied to this site\'s server each '
+            + 'time you save. Your browser copy stays too, and File > Save still downloads to '
+            + 'your machine. Turn it off any time from Edit > Server Files...','info');
+        }},{label:'No thanks', onClick:function(){}}],
+        {dismissOnAction:true});
     }).catch(function(){});
   }
 

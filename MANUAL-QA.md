@@ -182,9 +182,11 @@ wrong rather than anything that errors.
 
 **Server files (3 min)** — only on a site where the operator set `FCWEB_FILES=1`. On any
 other site the whole feature is absent, which is the correct default: skip this block.
-- [ ] **Before accepting anything, save a document and watch devtools' network tab.** No
-      request to `/files/` may appear. The site promises that nothing leaves the browser, and
-      this is the check that the promise is real rather than aspirational.
+- [ ] **Before accepting anything, save a document and watch devtools' network tab.** A
+      `GET /files` probe WILL appear — that is the page asking whether this site keeps
+      documents at all, and it is the only thing it may send. What must NOT appear is a
+      `PUT /files/<name>`. No document bytes leave the browser until you accept, which is
+      what keeps the site's "nothing leaves your browser" promise true.
 - [ ] **The one-time offer appears after the first real save**, and only once. Accepting it
       says plainly that documents will be *copied* to the server.
 - [ ] **Now File > Save, and the document appears in Edit > Server Files...** with a size

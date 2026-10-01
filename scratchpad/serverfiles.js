@@ -46,6 +46,21 @@ function stubEl() {
   };
 }
 
+// A document good enough for the panel builder: it creates real elements, sets textContent
+// and style on them, appends them, and calls requestAnimationFrame. Without createElement
+// the build path threw before reaching any of the logic under test.
+function stubDoc() {
+  const doc = stubEl();
+  doc.createElement = () => stubEl();
+  doc.getElementById = () => null;
+  doc.addEventListener = () => {};
+  doc.removeEventListener = () => {};
+  doc.querySelector = () => null;
+  doc.querySelectorAll = () => [];
+  doc.hidden = false;
+  return doc;
+}
+
 // A localStorage per instance, so two "browsers" really are two browsers.
 function makeStorage(seed) {
   const m = new Map(Object.entries(seed || {}));
@@ -64,7 +79,7 @@ function makeSandbox(opts = {}) {
   const storage = opts.storage || makeStorage();
   const toasts = [];
   const notes = [];
-  const doc = stubEl();
+  const doc = stubDoc();
   doc.body = stubEl();
   const calls = [];
   const sandbox = {
@@ -72,6 +87,7 @@ function makeSandbox(opts = {}) {
     setTimeout, clearTimeout, setInterval: () => 0, clearInterval,
     URL: { createObjectURL: () => 'blob:', revokeObjectURL() {} },
     Blob: class {}, TextEncoder, TextDecoder,
+    requestAnimationFrame: (fn) => fn(),
     // The block mints its namespace with crypto.getRandomValues. Without this the key is
     // null and EVERY request short-circuits, which would make the "makes no request"
     // assertions below pass without proving anything.
@@ -254,6 +270,41 @@ console.log('server files, page half, no server:');
   const before = t.calls.length;
   t.api.onSave('/home/web_user/_dl/Box.FCStd', new Uint8Array([1, 2, 3]));
   eq(t.calls.length, before, 'and a save on such a site writes nothing');
+}
+
+// The panel must survive being opened twice. Found on 2026-10-01 by the manual pass:
+// clicking Open threw "something went wrong" because the close helper called .remove() on
+// the HANDLE object rather than its element, so the document never opened. Reopening is
+// the shortest public-API path through that code -- build() closes any existing panel --
+// and with the bug it throws on the second call.
+{
+  const t = load({
+    fetch: (p, i) => {
+      const m = (i && i.method) || 'GET';
+      return Promise.resolve({
+        status: 200, ok: true,
+        text: () => Promise.resolve(m === 'GET'
+          ? '{"files":[{"name":"Bracket.FCStd","bytes":3,"saved":1700000000}],"used":3,"quota":2147483648,"max_mb":25}'
+          : '{"ok":true}')
+      });
+    }
+  });
+  let threw = null;
+  try {
+    await t.api.list();          // first open
+    await t.api.list();          // second open: build() closes the first
+  } catch (e) { threw = e; }
+  ok(!threw, 'opening the panel twice does not throw (' + (threw && threw.message) + ')');
+}
+
+// The offer's wording is part of its contract: "here" was reported as ambiguous, and the
+// dialog stayed up after being answered. Scoped to a BUTTON LABEL -- the phrase survives in
+// a comment explaining the change, so a bare search for the words proves nothing.
+{
+  const src = fs.readFileSync(HTML, 'utf8');
+  ok(!/label: *['"]Keep documents here/.test(src), 'the ambiguous "here" label is gone');
+  ok(/label: *['"]Send copies to the server/.test(src), 'the button names the server explicitly');
+  ok(/dismissOnAction/.test(src), 'the offer dismisses once answered');
 }
 }
 

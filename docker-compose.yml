@@ -73,6 +73,11 @@ services:
                                    # never answered by deleting one of your documents
       # FCWEB_FILES_TOTAL_GB: "20" # the store as a whole. Anyone can start a folder, so
                                    # the per-folder cap alone does not bound the volume.
+      # FCWEB_FILES_KEY: set to a secret to make the folder SHARED, so any browser that
+      # has the key sees the same documents -- which is the only way "reopen it on another
+      # machine" can work, since a per-browser folder cannot cross a machine. Users paste it
+      # into Edit > Server Files... or arrive with ?key=... in the URL. Leave it unset and
+      # every browser keeps its own private folder, as before.
     restart: unless-stopped
 
 volumes:

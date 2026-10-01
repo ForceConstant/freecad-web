@@ -6385,10 +6385,25 @@ window.fcRunPy = fcRunPy;
   // presents it as X-Fcweb-Ns, which the server treats as a folder name. One browser is one
   // folder, a second browser on the same box is a second folder, and the key is the only
   // key to either -- so a lost key loses the folder, exactly like a lost share key.
-  var FSNS='fcweb-files-ns', FSON='fcweb-files-on';
+  var FSNS='fcweb-files-ns', FSON='fcweb-files-on', FSKY='fcweb-files-key';
   var fcFilesAvail=null;      // null = not asked yet; the answer is cached for the session
   var fcFilesAsked=false;     // has this browser been asked whether to keep work here?
   var fcFilesBusy=false;      // a save is in flight; do not stack another
+  var fcFilesKey=null;        // a shared-folder key, when the operator set one
+
+  // A shared folder key, if this browser was given one: ?key=... on the URL, kept for the
+  // tab in sessionStorage so it survives the engine loading without persisting a secret to
+  // disk. Sent as X-Fcweb-Key, which the server honours ONLY when FCWEB_FILES_KEY is set --
+  // on a site without one the header is ignored and each browser keeps its own folder, so
+  // sending it is harmless either way.
+  (function(){
+    try{
+      var q=new URLSearchParams((typeof location!=='undefined'&&location.search)||'');
+      var k=q.get('key');
+      if(!k){ try{ k=sessionStorage.getItem(FSKY); }catch(le){} }
+      if(k){ fcFilesKey=String(k).slice(0,200); try{ sessionStorage.setItem(FSKY,k); }catch(le2){} }
+    }catch(e){}
+  })();
 
   // This browser's folder key, minted once and kept. EVERY request must present the same
   // one: minting per call would address a different, always-empty folder each time, which
@@ -6410,10 +6425,33 @@ window.fcRunPy = fcRunPy;
       return k;
     }catch(e){ return null; }
   }
-  function fcFileApi(method, path, body, ctype){
+  // The addressing headers, built once per call. A shared key WINS over the per-browser
+  // namespace, because the server ignores the namespace entirely when one is configured --
+  // which is what lets a second machine reach the same folder.
+  function fcFileHdrs(extra){
+    var h={};
     var ns=fcNs();
-    if(!ns){ return Promise.reject(new Error('no crypto')); }
-    var h={'X-Fcweb-Ns':ns};
+    if(ns){ h['X-Fcweb-Ns']=ns; }
+    if(fcFilesKey){ h['X-Fcweb-Key']=fcFilesKey; }
+    if(extra){ Object.keys(extra).forEach(function(k){ h[k]=extra[k]; }); }
+    return h;
+  }
+  // Adopt or drop the folder key. Dropping it returns this browser to its own per-browser
+  // folder, which is what "Clear" means on a site that has both arrangements available.
+  function fcFileSetKey(k){
+    fcFilesKey=k?String(k).slice(0,200):null;
+    try{
+      if(fcFilesKey){ sessionStorage.setItem(FSKY,fcFilesKey); }
+      else { sessionStorage.removeItem(FSKY); }
+    }catch(e){}
+    fcFilesAvail=null;     // the cached answer was about the folder we just left
+    fcFilesAsked=false;    // offer again once, for the folder now in play
+  }
+  function fcFileApi(method, path, body, ctype){
+    var h=fcFileHdrs(ctype?{'Content-Type':ctype}:null);
+    // Neither a namespace nor a key is a refusal, not a silent empty folder: without one
+    // the request would address a folder that can never be right.
+    if(!h['X-Fcweb-Ns'] && !h['X-Fcweb-Key']){ return Promise.reject(new Error('no key')); }
     if(ctype){ h['Content-Type']=ctype; }
     // The server answers 404 for a disabled server and for an empty folder alike, so the
     // page cannot tell "this site keeps no files" from "you have none yet" -- it asks once
@@ -6522,10 +6560,10 @@ window.fcRunPy = fcRunPy;
   // Read one document's bytes. Separate from fcFileApi because that one parses JSON, and a
   // .FCStd is not JSON -- so this cannot go through the same .text()/.json() path.
   function fcFileFetch(name){
-    var ns=fcNs();
-    if(!ns){ return Promise.reject(new Error('no crypto')); }
+    var h=fcFileHdrs(null);
+    if(!h['X-Fcweb-Ns'] && !h['X-Fcweb-Key']){ return Promise.reject(new Error('no key')); }
     return fetch('/files/'+encodeURIComponent(name), {
-      headers:{'X-Fcweb-Ns':ns}, cache:'no-store'
+      headers:h, cache:'no-store'
     }).then(function(r){
       if(r.status===404){ var e=new Error('files_off'); e.off=true; throw e; }
       if(!r.ok){
@@ -6615,13 +6653,48 @@ window.fcRunPy = fcRunPy;
     h.appendChild(t); h.appendChild(x);
     var note=document.createElement('div');
     note.style.cssText='font:11.5px inherit;opacity:.72;line-height:1.5';
-    note.textContent='Kept by this browser under a key only this browser holds. Anyone using this '
-      + 'site from this browser sees these files; the key never leaves it.';
+    note.textContent=fcFilesKey
+      ? 'Shared folder. Every browser with this folder key sees the same documents, so you '
+        + 'can open one on another machine. The key is the only thing that grants access.'
+      : 'Kept by this browser under a key only this browser holds. A different browser on this '
+        + 'site has its own folder and cannot see these documents -- paste a folder key below '
+        + 'if this server uses one.';
     var list=document.createElement('div');
     list.style.cssText='overflow:auto;display:flex;flex-direction:column;gap:6px';
     var foot=document.createElement('div');
     foot.style.cssText='font:11px inherit;opacity:.6;display:flex;gap:12px';
-    box.appendChild(h); box.appendChild(note); box.appendChild(list); box.appendChild(foot);
+    box.appendChild(h); box.appendChild(note);
+    // A folder-key row. Present whether or not a key is set: a browser on a SHARED server
+    // arrives here with nothing, and without somewhere to paste the key the only way to ever
+    // see the folder is a URL the operator has to hand over -- which is exactly the trap that
+    // made "open it on another machine" impossible in the first place.
+    var krow=document.createElement('div');
+    krow.style.cssText='display:flex;align-items:center;gap:7px';
+    var kin=document.createElement('input');
+    kin.type='password'; kin.placeholder='Folder key (if this server uses one)';
+    kin.value=fcFilesKey||'';
+    kin.style.cssText='flex:1;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.2);'+
+      'color:#e8e8e8;border-radius:6px;padding:5px 8px;font:12px inherit';
+    var kgo=document.createElement('button'); kgo.textContent='Use folder';
+    kgo.style.cssText='background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.22);'+
+      'color:#e8e8e8;border-radius:6px;padding:4px 10px;font:12px inherit;cursor:pointer';
+    kgo.addEventListener('click', function(){
+      var v=(kin.value||'').trim();
+      fcFileSetKey(v);
+      // Reload the list so the change is visible immediately: on a shared server this is the
+      // moment the folder appears, and without a repaint it looks like nothing happened.
+      if(fcFilePanel){ fcFilePanelClose(); fcFileList(); }
+    });
+    var kclr=document.createElement('button'); kclr.textContent='Clear';
+    kclr.style.cssText='background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.18);'+
+      'color:#e8e8e8;border-radius:6px;padding:4px 10px;font:12px inherit;cursor:pointer';
+    kclr.addEventListener('click', function(){
+      kin.value=''; fcFileSetKey('');
+      if(fcFilePanel){ fcFilePanelClose(); fcFileList(); }
+    });
+    krow.appendChild(kin); krow.appendChild(kgo); krow.appendChild(kclr);
+    box.appendChild(krow);
+    box.appendChild(list); box.appendChild(foot);
     back.appendChild(box);
     back.addEventListener('click', function(e){ if(e.target===back){ fcFilePanelClose(); } });
     document.body.appendChild(back);
@@ -6721,7 +6794,7 @@ window.fcRunPy = fcRunPy;
   window.fcwebServerFiles={
     available:fcFilesAvailable, list:fcFileList, enabled:fcFileEnabled,
     enable:fcFileEnable, save:fcFileSave, open:fcFileOpen, del:fcFileDelete,
-    offer:fcFileOffer, onSave:fcFileOnSave,
+    offer:fcFileOffer, onSave:fcFileOnSave, setKey:fcFileSetKey, key:fcFileHdrs,
     // What the save watcher hands us, exposed for scratchpad/serverfiles.js. Not part of
     // the page's own API; the harness asserts on these rather than on a copy of them.
     ns:fcNs, name:fcFileName, size:fcFileSize

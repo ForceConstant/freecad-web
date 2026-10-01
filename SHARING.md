@@ -33,6 +33,9 @@ and the Sharing page says the service is not running.
 | `FCWEB_SHARE_MAX_MB` | 25 | Largest document a session may hold |
 | `FCWEB_SHARE_MAX_GB` | 5 | Total volume before the least recently viewed session with no expiry is evicted. A session opened in the last day is never evicted, and a session that never published anything is dropped after an hour. When nothing may be evicted the write is refused instead. |
 | `FCWEB_PUBLIC_URL` | — | The origin used in links. Set it on any origin behind a proxy. Unset, each request's own host is used, which is right for a plain `docker compose up` and wrong almost everywhere else. |
+| `FCWEB_FILES` | `0` (off) | Turns on the server file store (`/files`), so a browser can keep its own documents there. **Off by default**: it is the one feature here that puts a model somewhere other than the user's disk. |
+| `FCWEB_FILES_MAX_GB` | 2 | Per-browser-folder ceiling. A write that does not fit is **refused**, never answered by evicting one of the user's documents — unlike a session, these are not disposable. |
+| `FCWEB_FILES_TOTAL_GB` | 20 | Ceiling on the store as a whole. The per-folder limit cannot do this job: anyone can mint a namespace, so N visitors × a 2 GB folder each is unbounded disk. This is the operator's backstop, and like the folder ceiling it **refuses** rather than evicting. |
 
 Sessions live in one Docker volume as plain files — `<id>.fcstd`, `<id>.env.json`,
 `<id>.json`. To see them:
@@ -44,6 +47,36 @@ docker compose exec session python /srv/share.py --stats
 
 **Documents on that volume are not encrypted.** Anyone with access to the server can read
 them. Passwords and the MCP token are stored only as hashes.
+
+### Server files (a second, separate opt-in)
+
+Sharing is a link you choose to send. Server files are different: they keep *your* documents
+on the box, so they are off unless you turn them on, and off in the browser until the user
+accepts a one-time offer. Neither switch implies the other.
+
+```yaml
+# docker-compose.yml, the session service
+environment:
+  FCWEB_FILES: "1"
+  FCWEB_FILES_MAX_GB: "2"
+  FCWEB_FILES_TOTAL_GB: "20"
+```
+
+With it off, `/files` answers 404 and the page treats the site as having no server files —
+the same answer it gives when the container is absent, so nothing in the UI depends on the
+operator having decided. With it on, **Edit → Server Files…** lists the folder, and each
+File → Save also copies the document there.
+
+Each browser has its own folder, named by a 32-hex key it mints and keeps in `localStorage`.
+There are no accounts. The key is the only thing addressing the folder, so a wrong or absent
+one is 404 rather than 403: a folder cannot be probed by guessing, and an existing folder
+cannot be told apart from one that does not exist.
+
+The store lives under `$FCWEB_FILES_DIR` (default `/data/files`) as `<key>.bin` plus a
+`<key>.json` sidecar holding only the name, size and save time. **The name is hashed, never
+used as a path** — it may hold spaces, accents and any script, and it is normalised to NFC
+so the same name typed on macOS and Windows is one document rather than two that look
+identical.
 
 ---
 

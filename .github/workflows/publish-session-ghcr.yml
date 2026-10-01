@@ -132,10 +132,16 @@ jobs:
             sleep 1
           done
           ns=0123456789abcdef0123456789abcdef
-          curl -fsS -X PUT -H "X-Fcweb-Ns: $ns" --data-binary 'FCStd' \
+          curl -fsS -X PUT -H "X-Fcweb-Ns: $ns" --data-binary 'FCStd-bytes' \
             -o /dev/null http://localhost:8098/files/Smoke.FCStd
-          curl -fsS http://localhost:8098/files | grep -q Smoke.FCStd \
+          # The namespace header is REQUIRED on the listing too, not just the write. /files
+          # answers 404 to a request with no folder named, and `curl -f` turns that into a
+          # failure -- so without -H here this job fails on a perfectly working image. Caught
+          # by running it: the first commit of this workflow failed exactly this way.
+          curl -fsS -H "X-Fcweb-Ns: $ns" http://localhost:8098/files | grep -q Smoke.FCStd \
             || { echo "::error::a saved document did not come back in the listing"; exit 1; }
+          got=$(curl -fsS -H "X-Fcweb-Ns: $ns" http://localhost:8098/files/Smoke.FCStd)
+          [ "$got" = "FCStd-bytes" ] || { echo "::error::bytes did not round-trip: $got"; exit 1; }
           echo "  server files reachable when opted in"
 
           docker rm -f verify2

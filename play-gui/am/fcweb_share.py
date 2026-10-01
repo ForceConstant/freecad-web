@@ -1141,6 +1141,16 @@ def install():
             Gui.addCommand(name, cmd)
         except Exception as e:
             _log('addCommand %s failed: %r' % (name, e))
+    # Put the entries in the menu NOW rather than waiting for the first tick(). The tick is
+    # what re-inserts them after a workbench switch rebuilds the menu bar, but it only runs
+    # once the autosave loop starts -- which is after the restore gate, several seconds into
+    # boot. Reported on 2026-10-01 as the entries not appearing until something was saved.
+    # Safe to call here: ensure_menu() returns False when the menu bar is not built yet, and
+    # it is idempotent, so the tick simply retries.
+    try:
+        ensure_menu()
+    except Exception as e:
+        _log('ensure_menu at install failed: %r' % (e,))
     pinned = _p().GetString('PinnedDocument', '')
     if pinned:
         pin(pinned)
